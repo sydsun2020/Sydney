@@ -1,0 +1,482 @@
+---
+title: "SAME_LIWC"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+---
+
+```{r}
+# read in necessary packages 
+# note, you will need to install the packages first, using this code:  install. packages(c("tidyverse", "sjPlot", "lmSupport", "lme4", "rstatix", "ggpubr"))
+# you might get some errors, if that happens, install one package at a time and see which is having issues.
+library(tidyverse)
+library(sjPlot)
+
+library(lme4)
+library(rstatix)
+library(ggpubr)
+library(car)
+```
+
+# NOTES
+We should check with Yuheiry about subject 51015, looks like we end up with just the child data and the number of recordings is NA
+
+# Make master datasets 
+
+NOTE: you do not need to run these "chunks" each time. Just including it in case we need to make any changes later.
+
+## Combine across games
+
+```{r, include = FALSE, echo = FALSE, eval = FALSE}
+# read in each dataset
+c_math <- read_csv("LIWC Board Game Data/math_child.csv")
+p_math <- read_csv("LIWC Board Game Data/math_parent.csv")
+
+c_emotion <- read_csv("LIWC Board Game Data/emotions_child.csv")
+p_emotion <- read_csv("LIWC Board Game Data/emotions_parent.csv")
+
+c_empathy <- read_csv("LIWC Board Game Data/empathy_child.csv")
+p_empathy <- read_csv("LIWC Board Game Data/empathy_parent.csv")
+
+c_manners <- read_csv("LIWC Board Game Data/manners_child.csv")
+p_manners <- read_csv("LIWC Board Game Data/manners_parent.csv")
+
+c_friendship <- read_csv("LIWC Board Game Data/friendship_child.csv")
+p_friendship <- read_csv("LIWC Board Game Data/friendship_parent.csv")
+
+d <- c_math %>%
+  full_join(p_math) %>%
+  full_join(c_emotion) %>%
+  full_join(p_emotion)%>%
+  full_join(c_empathy) %>%
+  full_join(p_empathy)%>%
+  full_join(c_manners) %>%
+  full_join(p_manners)%>%
+  full_join(c_friendship) %>%
+  full_join(p_friendship) %>%
+  separate(Filename, into = c("ID", "game", "speaker", "coder"), sep = "_", convert = TRUE) %>%
+  separate(coder, into = c("coder"), sep = ".docx", convert = TRUE) %>%
+  select(ID:coder, number, emotion, socbehav, affiliation)
+
+#describeBy(d, d$game)
+
+#write_csv(d, "SAME_LIWC_WORDS_2022.08.10.csv")
+```
+
+## Add in Questionnaire variables
+
+```{r, include = FALSE, echo = FALSE, eval = FALSE}
+q <- read_csv("FINAL SAME DATA_02212022 for Sydney.csv") %>%
+  select(ID, GROUP_INT, NumberofRecordings, C_AGE, C_SEX, C_RACE, P_RACE, RELATIONSHIPS, ANNUALINCOME:V1_EMOTION_WORDS, V1_AQ_TOT:V1_HARSHNESS) # I just included the visit 1 variables
+
+d <- read_csv("SAME_LIWC_WORDS_2022.08.10.csv") %>%
+  left_join(q)
+
+#write_csv(d, "SAME_LIWC_2022.08.10.csv")
+```
+
+## Reorganize so we have the social games both together and individually
+
+```{r, include = FALSE, echo = FALSE, eval = FALSE}
+d <- read_csv("SAME_LIWC_2022.08.10.csv") %>%
+  mutate(condition_C = ifelse(game == "MATH", -.5, .5), #recoding will be helpful for models later on
+         speaker_C = ifelse(speaker == "child", -.5, .5))
+
+#write_csv(d, "SAME_LIWC_2022.08.10.csv")
+
+table(d$game, d$condition_C) # let's make sure the code worked as expected
+table(d$speaker, d$speaker_C)
+
+# let's pull out social and math board games
+d_social <- d %>%
+  filter(condition_C == .5)
+
+#write_csv(d_social, "SAME_LIWC_2022.08.10_SOCIAL.csv")
+
+d_math <- d %>%
+  filter(condition_C == -.5)
+
+# The other thing we need to do is have a dataset that will average across social board games
+d_social_merge <- d %>%
+  filter(condition_C == .5) %>% # gets only social
+  pivot_wider(names_from = game, values_from = c(number, emotion, socbehav, affiliation)) 
+
+d_social_merge <- d_social_merge %>%
+  mutate(number = rowMeans(select(d_social_merge, starts_with("number_")), na.rm = TRUE))%>%
+  mutate(emotion = rowMeans(select(d_social_merge, starts_with("emotion_")), na.rm = TRUE))%>%
+  mutate(socbehav = rowMeans(select(d_social_merge, starts_with("socbehav_")), na.rm = TRUE))%>%
+  mutate(affiliation = rowMeans(select(d_social_merge, starts_with("affiliation_")), na.rm = TRUE)) %>%
+  mutate(game = "SOCIAL") %>%
+  select(ID, game, speaker, coder, number, emotion, socbehav, affiliation, GROUP_INT:speaker_C)
+
+d_mathSoc <- d_math %>%
+  full_join(d_social_merge)
+
+#write_csv(d_mathSoc, "SAME_LIWC_2022.08.10_MATH+SOCIAL.csv")
+```
+
+
+# Analysis Start Here
+
+First, we'll read in our datasets
+
+```{r}
+# this has data for the math game and each of the social games individually
+d <- read_csv("SAME_LIWC_2022.08.10.csv")
+
+# this just has the data for the social games individually
+d_social_ind <- read_csv("SAME_LIWC_2022.08.10_SOCIAL.csv")
+
+# this has the data for the math game and the social game (averaged across the 4 games)
+d_mathSoc <- read_csv("SAME_LIWC_2022.08.10_MATH+SOCIAL.csv")
+
+```
+
+Next, there are some subsets of the data we'll want to work with, so let's make them here.
+
+```{r}
+# just child speakers
+d_mathSoc_child <- d_mathSoc %>% 
+  filter(speaker == "child") 
+
+# just parent speakers
+d_mathSoc_parent <- d_mathSoc %>%
+  filter(speaker == "parent")
+
+# just math game
+d_math <- d_mathSoc %>% 
+  filter(game == "MATH")
+
+# just social game
+d_social <- d_mathSoc %>% 
+  filter(game == "SOCIAL")
+
+# just social game child
+d_social_child <- d_mathSoc %>% 
+  filter(game == "SOCIAL") %>% 
+  filter(speaker == "child") 
+
+# just social game parent
+d_social_parent <- d_mathSoc %>% 
+  filter(game == "SOCIAL") %>% 
+  filter(speaker == "parent") 
+```
+
+
+# Comparisons between Math and Social 
+
+Hypothesis 1: Participants will use more social-emotional language in the context of the social board game.
+
+- Participants will use more emotion words in the social vs. math board game
+- Participants will use more affiliation words in the social vs. math board game
+- Participants will use more social behavior words in the social vs. math board game
+- Participants will use more number words in the math vs. social board game
+
+These patterns are expected to be consistent for each children and parents
+
+## Running each t-test separately
+
+The code below will run each of the t-tests, and then make a boxplot.
+
+This would be really good code to run through. I think it will be the most easy to understand and good practice for you to work on replicating the code for all the variables.
+
+```{r}
+# compare NUMBER words between the math and social board game for CHILDREN
+t.test(number ~ game, data = d_mathSoc_child) #left of ~ is dependent variable, right is independent variable
+
+# now make a graph so we can visualize the difference
+ggplot(d_mathSoc_child, aes(x=game, y=number)) + # this tells what variables we're using
+  geom_boxplot() + # this tells what kind of graph we want
+  stat_summary(fun=mean, geom="point", shape=23) + # this plots the mean
+  geom_jitter(width = .03) + #this plots the individual points
+  labs(title = "Proportion Number Words Produced by Child", y = "number words") # this adds axis labels
+
+# compare number words between the math and social board game for parents
+t.test(number ~ game, data = d_mathSoc_parent) # I changed the dataset here to the parent one
+
+ggplot(d_mathSoc_parent, aes(x=game, y=number)) + # and I changed the dataset here to the parent one
+  geom_boxplot() +
+  stat_summary(fun=mean, geom="point", shape=23) + 
+  geom_jitter(width = .03)+
+  labs(title = "Proportion Number Words Produced by Parent", y = "number words") # make sure to change the title
+
+# compare emotion words between the math and social board game for children
+t.test(emotion ~ game, data = d_mathSoc_child) # I changed the variable to the left of the tilda to be "emotion"
+
+ggplot(d_mathSoc_child, aes(x=game, y=emotion)) + # I changed the y = to be "emotion"
+  geom_boxplot() +
+  stat_summary(fun=mean, geom="point", shape=23) + 
+  geom_jitter(width = .03) +
+  labs(title = "Proportion Emotion Words Produced by Child", y = "emotion words") # change title and y-axis label
+
+#MY WORK
+#compare emotion words between the math and social board game for parents
+t.test(emotion ~ game, data = d_mathSoc_parent)
+
+ggplot(d_mathSoc_parent, aes(x=game, y=emotion)) +
+  geom_boxplot() +
+  stat_summary(fun=mean, geom="point", shape=23) +
+  geom_jitter(width = .03) +
+  labs(title = "Proportion Emotion Words Produced by Parent", y = "emotion words")
+
+#compare social behavior words between the math and social board game for children
+t.test(socbehav ~ game, data = d_mathSoc_child)
+
+ggplot(d_mathSoc_child, aes(x=game, y=socbehav)) +
+  geom_boxplot() +
+  stat_summary(fun=mean, geom="point", shape=23) +
+  geom_jitter(width = .03) +
+  labs(title = "Proportion Social Behavior Words Produced by Child", y = "social behavior words")
+
+#compare social behavior words between the math and social board game for parents
+t.test(socbehav ~ game, data = d_mathSoc_parent)
+
+ggplot(d_mathSoc_parent, aes(x=game, y=socbehav)) +
+  geom_boxplot() +
+  stat_summary(fun=mean, geom="point", shape=23) +
+  geom_jitter(width = 0.03) +
+  labs(title = "Proportion Social Behavior Words Produced by Parent", y = "social behavior words")
+
+#compare affiliation words between the math and social board game for children
+t.test(affiliation ~ game, data = d_mathSoc_child)
+
+ggplot(d_mathSoc_child, aes(x=game, y=affiliation)) +
+  geom_boxplot() +
+  stat_summary(fun=mean, geom="point", shape=23) +
+  geom_jitter(width = .03) +
+  labs(title = "Proportion Affiliation Words Produced by Child", y = "affiliation words")
+
+#compare affiliation words between the math and social board game for parents
+t.test(affiliation ~ game, data = d_mathSoc_parent)
+
+ggplot(d_mathSoc_parent, aes(x=game, y=affiliation)) +
+  geom_boxplot() +
+  stat_summary(fun=mean, geom="point", shape=23) +
+  geom_jitter(width = 0.03) +
+  labs(title = "Proportion Affiliation Words Produced by Parent", y = "affiliation words")
+#END MY WORK
+
+# @Sydney, see if you can complete the code for each variable of interest by copying what I've done above
+
+```
+## Running all the t-tests at once
+
+This code is new to me, but I figure out how to run and plot mulitple t-tests at once. It's a little more complicated than the code above, but is essentially doing the same thing. 
+
+It's a good example of how there are many ways to run the same analysis in R.
+
+```{r}
+d_mathSoc_child_long <- d_mathSoc_child %>% # first we create a "long" dataset with just the variables for the t-tests
+  select(game, number:affiliation) %>%
+  pivot_longer(-game, names_to = "variables", values_to = "value")
+
+# here's the statistical test
+stat.test <- d_mathSoc_child_long %>% # we tell it what dataset to use
+  group_by(variables) %>% # and these are our DVs
+  t_test(value ~ game) %>% # then run the t-tests
+  adjust_pvalue(method = "bonferroni") %>% # we need to adjust the p-value bc we are running lots of tests
+  add_significance() 
+stat.test # this will show you the t-tests for each variable
+
+# This set of code will plot everything together
+# BUT because it's all together, the y-axis is fixed, which makes it hard to read some of the effects
+myplot <- ggboxplot(
+  d_mathSoc_child_long, x = "game", y = "value",
+  fill = "game", palette = "npg", legend = "none",
+  ggtheme = theme_pubr(border = TRUE)
+  ) +
+  facet_wrap(~variables)
+stat.test <- stat.test %>% add_xy_position(x = "game")
+myplot + stat_pvalue_manual(stat.test, label = "p.adj.signif")
+
+# We can plot the graphs separately here
+graphs <- d_mathSoc_child_long %>%
+  group_by(variables) %>%
+  doo(
+    ~ggboxplot(
+      data =., x = "game", y = "value",
+      fill = "game", palette = "npg", legend = "none",
+      ggtheme = theme_pubr()
+      ), 
+    result = "plots"
+  )
+graphs
+
+
+# this is a function to apply the graphing to each of our variable. I'm not very good with functions, so I rarely write them myself and just copy them when useful. 
+variables <- graphs$variables
+for(i in 1:length(variables)){
+  graph.i <- graphs$plots[[i]] + 
+    labs(title = variables[i]) +
+    geom_jitter(width = .01, alpha = .3) +
+    stat_summary(fun=mean, geom="point", shape=23, size=5) + 
+    stat_pvalue_manual(stat.test[i, ], label = "p.adj.signif")
+  print(graph.i)
+}
+```
+
+## Here's a way to look at similar output with a mixed effects model
+
+Ultimately, I think mixed effects models might be a useful way to look at the question. These allow us to look at what we did above (i.e., is the proportion of words different between the math and social games) AND it lets us look at differences between parents and children. 
+
+```{r}
+# here's a model to examine number
+mod_number <- lmer(number ~ game*speaker + (1|ID), d_mathSoc) #notice I'm using the "full" dataset that includes parents and children
+car::Anova(mod_number)
+summary(mod_number)
+plot_model(mod_number, type = "pred", terms = c("speaker", "game"))
+# In the graph you can see that both children and adults use more number words in the math game, but the difference is bigger for kids
+
+mod_emotion <- lmer(emotion ~ game*speaker + (1|ID), d_mathSoc) #now we can look at emotion words
+car::Anova(mod_emotion)
+summary(mod_emotion)
+plot_model(mod_emotion, type = "pred", terms = c("speaker", "game"))
+#, show.data = TRUE, jitter = .01
+
+# @Sydney, you can try and make models for affiliation and socbehav
+
+#MY MODELS for affiliation and socbehav
+mod_socbehav <- lmer(socbehav ~ game*speaker*CU_T1 + (1|ID), d_mathSoc)
+cars::Anova(mod_socbehav)
+summary(mod_socbehav)
+plot_model(mod_socbehav, type = "pred", terms = c("speaker", "game"), show.data = TRUE, jitter = .01)
+
+mod_affiliation <- lmer(affiliation ~ game*speaker*CU_T1 + (1|ID), d_mathSoc)
+cars::Anova(mod_affiliation)
+summary(mod_affiliation)
+plot_model(mod_affiliation, type = "pred", terms = c("speaker", "game"), show.data = TRUE, jitter = .01)
+
+
+```
+# Individual Differences
+
+Where you see "TOT_ICU_T1" you can sub in any of the individual difference variables of interest. 
+```{r}
+# Again, a few different ways to do this. I think it maybe makes the most sense to look at the interaction between game and CU (or any other individual difference variable) in the child dataset only. 
+
+# But using the linear models, we can really ask your original Hypothesis 2 question: is the relationship between CU traits and emotion words stronger in the social vs. nonsocial board game condition
+
+# this is a bit different from how I usually code variables, but probably makes the most sense since we're most interested in relationships in the social condition
+d_mathSoc_child$game <- factor(d_mathSoc_child$game, levels = c("SOCIAL", "MATH"))
+
+# starting with number
+mod_number_ID <- lm(number ~ game*TOT_ICU_T1, d_mathSoc_child)
+summary(mod_number_ID)
+plot_model(mod_number_ID, type = "pred", terms = c("TOT_ICU_T1", "game"), show.data = TRUE, jitter = .01)
+# here the graph shows the correlation between cu and number words for each board game 
+
+# emotion words
+mod_emotion_ID <- lm(emotion ~ game*TOT_ICU_T1, d_mathSoc_child) #now we can look at emotion words
+summary(mod_emotion_ID)
+plot_model(mod_emotion_ID, type = "pred", terms = c("TOT_ICU_T1", "game"), show.data = TRUE, jitter = .01)
+
+# affiliation words
+mod_affiliation_ID <- lm(affiliation ~ game*TOT_ICU_T1, d_mathSoc_child) #now we can look at emotion words
+summary(mod_affiliation_ID)
+plot_model(mod_affiliation_ID, type = "pred", terms = c("TOT_ICU_T1", "game"), show.data = TRUE, jitter = .01)
+
+# social behavior words
+mod_socbehav_ID <- lm(socbehav ~ game*TOT_ICU_T1, d_mathSoc_child) #now we can look at emotion words
+summary(mod_socbehav_ID)
+plot_model(mod_socbehav_ID, type = "pred", terms = c("TOT_ICU_T1", "game"), show.data = TRUE, jitter = .01)
+
+```
+
+
+# Consistency
+
+Still thinking about this...do we want to include parents with speaker as a factor?
+
+## Comparing across games
+```{r}
+d_social_ind_child <- d_social_ind %>%
+  filter(speaker == "child")
+
+library(emmeans)
+
+mod_emotion_cons <- lmer(emotion ~ game*speaker + (1| ID), d_social_ind) #now we can look at emotion words
+car::Anova(mod_emotion_cons)
+summary(mod_emotion_cons)
+emmeans(mod_emotion_cons, pairwise ~ game|speaker)
+plot_model(mod_emotion_cons, type = "pred", terms = c("game", "speaker"), show.data = TRUE, jitter = .01)
+
+mod_affiliation_cons <- lmer(affiliation ~ game + (1| ID), d_social_ind) #now we can look at emotion words
+car::Anova(mod_affiliation_cons)
+summary(mod_affiliation_cons)
+emmeans(mod_affiliation_cons, pairwise ~ game)
+plot_model(mod_affiliation_cons, type = "pred", terms = c( "game"), show.data = TRUE, jitter = .01)
+
+mod_socbehav_cons <- lmer(socbehav ~ game+ (1| ID), d_social_ind) #now we can look at emotion words
+car::Anova(mod_socbehav_cons)
+summary(mod_socbehav_cons)
+emmeans(mod_socbehav_cons, pairwise ~ game)
+plot_model(mod_socbehav_cons, type = "pred", terms = c("game"), show.data = TRUE, jitter = .01)
+```
+
+## Comparisons including individual differences
+```{r}
+mod_emotion_cons_ID <- lmer(emotion ~ game*TOT_ICU_T1 + (1| ID), d_social_ind) #now we can look at emotion words
+car::Anova(mod_emotion_cons_ID)
+summary(mod_emotion_cons_ID)
+plot_model(mod_emotion_cons_ID, type = "pred", terms = c("TOT_ICU_T1", "game"), show.data = TRUE, jitter = .01)
+
+mod_affiliation_cons_ID <- lmer(affiliation ~ game*TOT_ICU_T1 + (1| ID), d_social_ind) #now we can look at emotion words
+car::Anova(mod_affiliation_cons_ID)
+summary(mod_affiliation_cons_ID)
+plot_model(mod_affiliation_cons_ID, type = "pred", terms = c("TOT_ICU_T1", "game"), show.data = TRUE, jitter = .01)
+
+mod_socbehav_cons_ID <- lmer(socbehav ~ game*TOT_ICU_T1 + (1| ID), d_social_ind) #now we can look at emotion words
+car::Anova(mod_socbehav_cons_ID)
+summary(mod_socbehav_cons_ID)
+plot_model(mod_socbehav_cons_ID, type = "pred", terms = c("TOT_ICU_T1", "game"), show.data = TRUE, jitter = .01)
+
+```
+
+# empathy game patterns
+
+I just had hypotheses about GEM for these patterns, but you could ask about other variables if you would like!
+
+```{r}
+d_empathy <- d_social_ind %>%
+  filter(game == "EMPATHY")
+
+# emotion
+mod_emo <- lmer(emotion ~ speaker_C*V1_GEM_TOT+ (1| ID), d_empathy)
+car::Anova(mod_emo)
+summary(mod_emo)
+plot_model(mod_emo, type = "pred", terms = c("V1_GEM_TOT", "speaker_C"), show.data = TRUE, jitter = .01)
+
+mod_emo_aff <- lmer(emotion ~ speaker_C*V1_GEM_AFFECTIVE + (1| ID), d_empathy)
+car::Anova(mod_emo_aff)
+summary(mod_emo_aff)
+plot_model(mod_emo_aff, type = "pred", terms = c("V1_GEM_AFFECTIVE", "speaker_C"), show.data = TRUE, jitter = .01)
+
+mod_emo_cog <- lmer(emotion ~ speaker_C*V1_GEM_COGNITIVE + (1| ID), d_empathy)
+car::Anova(mod_emo_cog)
+summary(mod_emo_cog)
+plot_model(mod_emo_cog, type = "pred", terms = c("V1_GEM_COGNITIVE", "speaker_C"), show.data = TRUE, jitter = .01)
+
+# social behavior
+mod_socbev <- lmer(socbehav ~ speaker_C*V1_GEM_TOT + (1| ID), d_empathy)
+car::Anova(mod_socbev)
+summary(mod_socbev)
+plot_model(mod_socbev, type = "pred", terms = c("V1_GEM_TOT", "speaker_C"), show.data = TRUE, jitter = .01)
+
+mod_socbev_aff <- lmer(socbehav ~ speaker_C*V1_GEM_AFFECTIVE + (1| ID), d_empathy)
+car::Anova(mod_socbev_aff)
+summary(mod_socbev_aff)
+plot_model(mod_socbev_aff, type = "pred", terms = c("V1_GEM_AFFECTIVE", "speaker_C"), show.data = TRUE, jitter = .01)
+
+mod_socbev_cog <- lmer(socbehav ~ speaker_C*V1_GEM_COGNITIVE + (1| ID), d_empathy)
+car::Anova(mod_socbev_cog)
+summary(mod_socbev_cog)
+plot_model(mod_socbev_cog, type = "pred", terms = c("V1_GEM_COGNITIVE", "speaker_C"), show.data = TRUE, jitter = .01)
+
+```
+
+
+# parent/child alignment
+
+child emotion words ~ parent emotion words * game * ind diff
+
